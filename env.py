@@ -124,7 +124,7 @@ class DroneEnv(object):
         quad_state = self.client.getMultirotorState().kinematics_estimated.position
         quad_vel = self.client.getMultirotorState().kinematics_estimated.linear_velocity
         # both x and y can go forward or backward
-        if directions == '4' or directions == '3_customized':
+        if directions == '4' or directions == '3_customized' or directions == '3_minus_y':
             next_quad_state = airsim.Vector3r(quad_state.x_val + self.delta_t * self.quad_offset[0],
                                           quad_state.y_val + self.delta_t * self.quad_offset[1],
                                           -2.0)
