@@ -90,6 +90,10 @@ class DroneEnv(object):
         self.destination = airsim.Vector3r(random_*math.cos(head), random_*math.sin(head), -3.5)
         print('The destination of this test is {}'.format(self.destination))
 
+    def set_destination(self, pos):
+        self.destination = airsim.Vector3r(pos[0], pos[1], pos[2])
+        print('The destination of this test is {}'.format(self.destination))
+
     def is_collision(self):
         if self.client.simGetCollisionInfo().has_collided:
             return True

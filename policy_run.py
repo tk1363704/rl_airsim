@@ -35,8 +35,7 @@ parser.add_argument('--load_model', default=True, action='store_true', help='Loa
 parser.add_argument('--model_path', default='reward_dist_savefunc_best_distance_directions_3_customized\\PRDDQN_currentdist_154_model.pth', help='Model Path')
 parser.add_argument('--test_episode', default=50, help='Testing episodes')
 parser.add_argument('--log_path', default='log\\test\\', help='Log Path')
-parser.add_argument('--directions', default='3_customized', help='the directions that drone can move towards')
-
+parser.add_argument('--directions', default='3_minus_y', help='the directions that drone can move towards')
 
 
 args = parser.parse_args()
@@ -93,6 +92,7 @@ for e_ in range(int(args.test_episode)):
     # print("--------------Episode {}--------------:".format(e_))
     logging.info("--------------Episode {}--------------:".format(str(e_)))
     env.reset_destination()
+    # env.set_destination([0, 0, -3.5])
     logging.info("--------------Destination coordinate {}--------------:".format(str(env.get_destination())))
     test_current_time = time.time()
     logging.info("--------------test_current_time: {}--------------:".format(str(test_current_time)))
@@ -100,7 +100,7 @@ for e_ in range(int(args.test_episode)):
     prev_time = 0
     framerate = 0
     state = env.reset()
-    env.setObsRandom()
+    # env.setObsRandom()
     frame_idx = 1
     min_distance = 100000
     while True:
@@ -108,11 +108,12 @@ for e_ in range(int(args.test_episode)):
                     current_time - prev_time)
         prev_time = current_time
         current_time = time.time()
-        epsilon = epsilon_by_frame(frame_idx)
+        # epsilon = epsilon_by_frame(frame_idx)
+        epsilon = -1
         action = target_model.act(state, epsilon)
         logging.info("-------Action {}-------: {}".format(str(frame_idx), str(action)))
         # print("-------Action {}-------:".format(frame_idx), action)
-        env.setObsDynamic()
+        # env.setObsDynamic()
 
         next_state, reward, done = env.step(action, args.directions)
         distance_ = env.distance_to_destination()
