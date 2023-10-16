@@ -3,6 +3,9 @@ Deep RL training for obstacle avoidance in AirSim
 Author : Varun Pawar
 E-mail : varunpwr897@gmail.com
 """
+import datetime
+import logging
+import os
 
 import gym
 from env import DroneEnv
@@ -19,6 +22,7 @@ import torch.nn.functional as F
 from IPython.display import clear_output
 import matplotlib.pyplot as plt
 
+PROJECT_ABSOLUTE_PATH = os.path.dirname(os.path.abspath(__file__))
 
 import cv2
 import csv
@@ -34,17 +38,25 @@ parser.add_argument('--dueling', default=False, action='store_true', help='Load 
 parser.add_argument('--load_model', default=False, action='store_true', help='Load model')
 parser.add_argument('--model_path', default='log\\model\\PRDDQN_model.pth', help='Model Path')
 parser.add_argument('--optimizer_path', default='log\\model\\PRDDQN_optimizer.pth', help='Optimizer Path')
-parser.add_argument('--log_path', default='log\\statistics\\', help='Log Path')
+parser.add_argument('--log_path', default='log\\train\\', help='Log Path')
 parser.add_argument('--update_freq', default=10, help='Update frequency of model')
-parser.add_argument('--save_freq', default=1000, help='Save frequency of model')
-parser.add_argument('--num_frames', default=1000000, help='Number of Frames for training')
-parser.add_argument('--batch_size', default=128, help='Training batch size')
+parser.add_argument('--save_freq', default=5000, help='Save frequency of model')
+parser.add_argument('--save_function', default='best_distance', help='save function: [initial, best_distance (save the model that are the closest to the destination)]')
+parser.add_argument('--num_frames', default=100000, help='Number of Frames for training')
+parser.add_argument('--batch_size', default=32, help='Training batch size')
 parser.add_argument('--replay_size', default=10000, help='Replay memory size')
 parser.add_argument('--replay_initial', default=1000, help='Initial untrained replay')
-
-
+parser.add_argument('--reward', default='dist', help='reward design: [initial, dist(distance to destination), dist_with_heuristic]')
+parser.add_argument('--directions', default='3_minus_y', help='the directions that drone can move towards: [4(4 discrete directions), 3(original setting), 3_minus_y(original setting but y can move towards backward direction, x can only move toward forward), 3_customized(3 discrete directions)]')
 
 args = parser.parse_args()
+
+file_path = PROJECT_ABSOLUTE_PATH + '\\'+ args.log_path + '\\{}_{}_{}_directions_{}.log'.format(time.strftime("%Y%m%d-%H%M%S"), args.reward, args.save_function, args.directions)
+directory_path = os.path.dirname(file_path)
+if not os.path.exists(directory_path):
+    os.makedirs(directory_path)
+logging.basicConfig(filename=file_path, level=logging.INFO)
+
 
 # Log file
 timestr = time.strftime("%Y%m%d-%H%M%S")
@@ -57,12 +69,13 @@ with open(csv_name, 'w', newline = '') as csvfile:
 
 # Initialize Environment
 if args.env == 'DroneEnv':
-    env = DroneEnv()
+    env = DroneEnv(reward_design=args.reward, logging=logging)
 else:
     env = gym.make(args.env)
 
-# Initialize Epsilon 
+# Initialize Epsilon
 epsilon_start = 1.0
+# epsilon_start = 0.01
 epsilon_final = 0.01
 epsilon_decay = 10000
 
@@ -74,12 +87,13 @@ beta_frames = 1000
 beta_by_frame = lambda frame_idx: min(1.0, beta_start + frame_idx * (1.0 - beta_start) / beta_frames)
 
 # Initialize NN
+direction_num = int(args.directions.split('_')[0])
 if args.dueling:
-    current_model = DuelingCnnDQN([1,32,32], 3)
-    target_model = DuelingCnnDQN([1,32,32], 3)
+    current_model = DuelingCnnDQN([1,32,32], direction_num)
+    target_model = DuelingCnnDQN([1,32,32], direction_num)
 else:
-    current_model = CnnDQN([1,32,32], 3)
-    target_model  = CnnDQN([1,32,32], 3)
+    current_model = CnnDQN([1,32,32], direction_num)
+    target_model  = CnnDQN([1,32,32], direction_num)
 
 # USE CUDA if available
 USE_CUDA = torch.cuda.is_available()
@@ -150,6 +164,8 @@ num_frames = int(args.num_frames)
 batch_size = int(args.batch_size)
 gamma      = 0.99
 
+global_mini_distance = 100000.0
+
 no_episodes = 0
 losses = [0]
 all_rewards = []
@@ -159,6 +175,9 @@ prev_time = 0
 framerate = 0
 state = env.reset()
 env.setObsRandom()
+print("--------------Episode {}--------------:".format(str(no_episodes)))
+logging.info("--------------Episode {}--------------:".format(str(no_episodes)))
+
 for frame_idx in range(1, num_frames + 1):
     framerate = (1 - math.exp(-(frame_idx-1)/1000))*framerate + math.exp(-(frame_idx-1)/1000)/(current_time - prev_time)
     prev_time = current_time
@@ -167,16 +186,39 @@ for frame_idx in range(1, num_frames + 1):
     epsilon = epsilon_by_frame(frame_idx)
     action = current_model.act(state, epsilon)
     print("-------Action:", action)
+    logging.info("-------Action: {}".format(str(action)))
     env.setObsDynamic()
 
-    next_state, reward, done = env.step(action)
+    next_state, reward, done = env.step(action, args.directions)
+    print("-------reward:", reward)
+    logging.info("-------Reward: {}".format(str(reward)))
     # replay_buffer.push(state, action, Fmain, next_state, done)
     replay_buffer.push(state, action, reward, next_state, done)
     state = next_state
     episode_reward += reward
-
     if done:
+        if args.save_function == 'best_distance':
+            if not env.client.simGetCollisionInfo().has_collided:
+                current_dist = env.distance_to_destination()
+                if current_dist < global_mini_distance:
+                    path_ = PROJECT_ABSOLUTE_PATH + '\\log\\model\\reward_{}_savefunc_{}_directions_{}\\PRDDQN_currentdist_{}_model.pth'.format(args.reward, args.save_function, args.directions, str(int(current_dist)))
+                    directory_path = os.path.dirname(path_)
+                    if not os.path.exists(directory_path):
+                        os.makedirs(directory_path)
+                    torch.save(current_model.state_dict(),
+                               path_)
+                    optimizer_path_ = PROJECT_ABSOLUTE_PATH + '\\log\\model\\reward_{}_savefunc_{}_directions_{}\\PRDDQN_currentdist_{}_optimizer.pth'.format(args.reward, args.save_function, args.directions, str(int(current_dist)))
+                    torch.save(optimizer.state_dict(),
+                               optimizer_path_)
+                    print("Torch saving best model...")
+                    logging.info("Torch saving best model...")
+                    global_mini_distance = current_dist
+                    logging.info('global_mini_distance is updated to {}'.format(str(global_mini_distance)))
+                    print('global_mini_distance is updated to {}'.format(str(global_mini_distance)))
+
         no_episodes += 1
+        print("--------------Episode {}--------------:".format(str(no_episodes)))
+        logging.info("--------------Episode {}--------------:".format(str(no_episodes)))
         state = env.reset()
         all_rewards.append(episode_reward)
         
@@ -192,7 +234,8 @@ for frame_idx in range(1, num_frames + 1):
             update_target(current_model, target_model)
 
         
-    print('-------Frame Rate:', framerate)    
+    print('-------Frame Rate:', framerate)
+    logging.info('-------Frame Rate: {}'.format(str(framerate)))
     if (len(replay_buffer) > replay_initial):
         adjust_learning_rate(optimizer, frame_idx)
         beta = beta_by_frame(frame_idx)
@@ -201,15 +244,24 @@ for frame_idx in range(1, num_frames + 1):
 
     if frame_idx % 100 == 0:
         print("frame_idx is {}".format(frame_idx))
+        logging.info("frame_idx is {}".format(str(frame_idx)))
 
     if frame_idx % int(args.save_freq) == 0:
-        torch.save(current_model.state_dict(), 'PRDDQN.pth')
-        torch.save(optimizer.state_dict(), 'PRDDQN_optimizer.pth')
+        path_ = PROJECT_ABSOLUTE_PATH + '\\log\\model\\reward_{}_savefunc_{}_directions_{}\\PRDDQN_freq_{}_model.pth'.format(args.reward, args.save_function, args.directions, str(int(frame_idx/5000)))
+        directory_path = os.path.dirname(path_)
+        if not os.path.exists(directory_path):
+            os.makedirs(directory_path)
+        torch.save(current_model.state_dict(), path_)
+        optimizer_path = PROJECT_ABSOLUTE_PATH + '\\log\\model\\reward_{}_savefunc_{}_directions_{}\\PRDDQN_freq_{}_optimizer.pth'.format(args.reward, args.save_function, args.directions, str(int(frame_idx/5000)))
+        torch.save(optimizer.state_dict(), optimizer_path)
         print("Torch saving ...")
+        logging.info("Torch saving ...")
 
-torch.save(current_model.state_dict(), 'PRDDQN.pth')
-torch.save(optimizer.state_dict(), 'PRDDQN_optimizer.pth')
-print("Torch saving ...")
-print("Training ends here ...")
+# torch.save(current_model.state_dict(), 'log\\model\\PRDDQN_{}.pth'.format(args.reward))
+# torch.save(optimizer.state_dict(), 'log\\model\\PRDDQN_{}_optimizer.pth'.format(args.reward))
+# print("Torch saving ...")
+# print("Training ends here ...")
+# logging.info("Torch saving ...")
+# logging.info("Training ends here ...")
 
 

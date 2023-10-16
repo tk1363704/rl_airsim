@@ -74,7 +74,7 @@ class CnnDQN(nn.Module):
             action  = q_value.max(1)[1].item()
         else:
             # keyAct = input ("Enter number: ") 
-            action = random.randrange(0,3)
+            action = random.randrange(0,self.num_actions)
             # print "You have ten seconds to answer!"
             
         return action

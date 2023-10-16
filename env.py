@@ -26,11 +26,13 @@ from numpy import random as rnd
 import torch
 
 random.seed(1987)
+RANDOM_DESTINATION = 50.0
 
 class DroneEnv(object):
     """Drone environment class using AirSim python API"""
 
-    def __init__(self):
+    def __init__(self, reward_design='initial', logging=None):
+        self.logging = logging
         self.client = airsim.MultirotorClient()
         self.client.confirmConnection()
         self.client.enableApiControl(True)
@@ -38,6 +40,8 @@ class DroneEnv(object):
         self.pose = self.client.simGetVehiclePose()
         self.state = self.client.getMultirotorState().kinematics_estimated.position
         print("Initial Position: ", self.state.x_val, self.state.y_val, self.state.z_val)
+        self.logging.info("Initial Position: {}, {}, {}".format(str(self.state.x_val), str(self.state.y_val), str(self.state.z_val)))
+        self.initial_position = (self.state.x_val, self.state.y_val, self.state.z_val)
         self.quad_offset = (0, 0, 0)
         self.mindist = 100
         initX = 0
@@ -47,6 +51,7 @@ class DroneEnv(object):
         self.delta_t = 1
         self.drone_velocity = 1
         self.kp = 0.09
+
         
         self.DIMAGE = 0*np.random.rand(32,32)
         self.dsteps = 0
@@ -62,18 +67,27 @@ class DroneEnv(object):
         self.client.moveToPositionAsync(initX, initY, initZ, 5).join()
         head = random.uniform(-np.pi, np.pi)*0 + 0*np.pi
         self.client.rotateToYawAsync(yaw = head*180/np.pi, timeout_sec = 3e+38, margin = 5).join()
-        self.destination = airsim.Vector3r(203.0*math.cos(head), 203.0*math.sin(head),-3.5)
+        self.destination = airsim.Vector3r(RANDOM_DESTINATION*math.cos(head), RANDOM_DESTINATION*math.sin(head),-3.5)
+
         print('The destination of this training is {}'.format(self.destination))
+        self.logging.info('The destination of this training is {}'.format(str(self.destination)))
         self.ep = 0#first episode of the training loop.
+        self.initial_dist = np.linalg.norm(np.array([self.state.x_val, self.state.y_val, self.state.z_val, ]) - np.array(
+            [self.destination.x_val, self.destination.y_val, self.destination.z_val, ]))
+        self.reward_design = reward_design
+
 
     def get_destination(self):
         return self.destination
 
+    def get_initial_position(self):
+        return self.initial_position
+
     def reset_destination(self):
-        random_x, random_y = random.randint(20, 50), random.randint(0, 50)
-        # todo
+        # random_ = random.randint(20, 50)
+        random_ = RANDOM_DESTINATION
         head = random.uniform(-np.pi, np.pi) * 0 + 0 * np.pi
-        self.destination = airsim.Vector3r(random_x*math.cos(head), random_y*math.sin(head), -3.5)
+        self.destination = airsim.Vector3r(random_*math.cos(head), random_*math.sin(head), -3.5)
         print('The destination of this test is {}'.format(self.destination))
 
     def is_collision(self):
@@ -87,23 +101,35 @@ class DroneEnv(object):
 
     def distance_to_destination(self):
         quad_state = self.client.getMultirotorState().kinematics_estimated.position
-        dest = np.linalg.norm(np.array([quad_state.x_val, quad_state.y_val, quad_state.z_val, ]) - np.array(
+        dist = np.linalg.norm(np.array([quad_state.x_val, quad_state.y_val, quad_state.z_val, ]) - np.array(
             [self.destination.x_val, self.destination.y_val, self.destination.z_val, ]))
-        return dest
+        return float(dist)
 
-    def step(self, action):
+    def step(self, action, directions):
         """Step"""
         self.dsteps +=1
-        self.quad_offset, qhead = self.interpret_action(action)
+        self.quad_offset, qhead = self.interpret_action(action, directions)
         if self.dsteps%10 == 0:
             print("doing step: {}".format(self.dsteps))
+            self.logging.info("doing step: {}".format(str(self.dsteps)))
+            print("action: {}".format(action))
+            self.logging.info("action: {}".format(str(action)))
             # self.quad_offset is (v_xval, v_yval, v_zval, yaw)
             print("quad_offset: ", self.quad_offset)
+            self.logging.info("quad_offset: {}".format(str(self.quad_offset)))
         quad_state = self.client.getMultirotorState().kinematics_estimated.position
         quad_vel = self.client.getMultirotorState().kinematics_estimated.linear_velocity
-        next_quad_state = airsim.Vector3r(quad_state.x_val + self.delta_t*max(self.quad_offset[0], 0), 
-                            quad_state.y_val + self.delta_t*self.quad_offset[1], 
-                            -2.0)
+        # both x and y can go forward or backward
+        if directions == '4' or directions == '3_customized':
+            next_quad_state = airsim.Vector3r(quad_state.x_val + self.delta_t * self.quad_offset[0],
+                                          quad_state.y_val + self.delta_t * self.quad_offset[1],
+                                          -2.0)
+        # directions ==3 or 3_minus_y, original setting, x can only go forward
+        else:
+            next_quad_state = airsim.Vector3r(quad_state.x_val + self.delta_t * max(self.quad_offset[0], 0),
+                                              quad_state.y_val + self.delta_t * self.quad_offset[1],
+                                              -2.0)
+
         self.client.moveOnPathAsync([quad_state,
                                 next_quad_state],
                         self.drone_velocity, 0.5*self.delta_t,
@@ -126,25 +152,26 @@ class DroneEnv(object):
         prev_quad_state = quad_state
         quad_state = self.client.getMultirotorState().kinematics_estimated.position
         quad_vel = self.client.getMultirotorState().kinematics_estimated.linear_velocity
-        if self.dsteps%10 == 0:
-            print(
-                "state x:",
-                quad_state.x_val,
-                " y: ",
-                quad_state.y_val,
-                " z: ",
-                quad_state.z_val,
-            )
         state = self.Dimage()
-        result = self.compute_reward(state, quad_state, quad_vel)
+        if self.reward_design == 'dist':
+            result = self.compute_reward_dist(state, quad_state, quad_vel)
+        else:
+            result = self.compute_reward(state, quad_state, quad_vel)
 
         done = self.isDone(result,  prev_quad_state)
 
-        # Prefer moving forward
-        if action == 1:
-            result += 0.5
-        if done:
-            result = -10
+        if self.reward_design == 'dist':
+            if self.client.simGetCollisionInfo().has_collided:
+                result += -10
+            elif self.mindist < 1:
+                result += 10
+
+        else:
+            # Prefer moving forward
+            if action == 1:
+                result += 0.5
+            if done:
+                result = -10
 
         # #Penalize heavily if collides
         # if quad_state.x_val >= 400:
@@ -164,6 +191,20 @@ class DroneEnv(object):
         elif self.dsteps >= 1000:
             self.dsteps = 0
             done = 1
+
+        if self.dsteps%10 == 0:
+            print(
+                "steps {}:\n".format(self.dsteps),
+                " x: ",
+                quad_state.x_val,
+                " y: ",
+                quad_state.y_val,
+                " z: ",
+                quad_state.z_val,
+                " reward: ",
+                result,
+            )
+            self.logging.info("steps {}:\n x: {} y: {} z: {} reward: {}".format(str(self.dsteps), str(quad_state.x_val), str(quad_state.y_val), str(quad_state.z_val), str(result)))
 
         return state, result, done
 
@@ -193,15 +234,18 @@ class DroneEnv(object):
         self.collision_change = False
         self.Objs = self.setObsRandom()
         self.client.takeoffAsync().join()
-        print("Reset to initial state! take off moving positon!s")
+        print("Reset to initial state! take off moving position!")
         self.client.moveToPositionAsync(initX, initY, initZ, 5).join()
-        # todo
+        # todo head
         head = random.uniform(-np.pi, np.pi)*0 +  0*np.pi
         self.client.rotateToYawAsync(yaw = head*180/np.pi, timeout_sec = 3e+38, margin = 5).join()
         responses = self.client.simGetImages(
             [airsim.ImageRequest("1", airsim.ImageType.Scene, False, False)]
         )
         state = self.Dimage()
+        self.initial_dist = np.linalg.norm(
+            np.array([self.state.x_val, self.state.y_val, self.state.z_val, ]) - np.array(
+                [self.destination.x_val, self.destination.y_val, self.destination.z_val, ]))
         return state
 
     def get_obs(self):
@@ -244,23 +288,64 @@ class DroneEnv(object):
 
         return im_final
 
-    def interpret_action(self, action):
+    def interpret_action(self, action, directions):
         """Interprete action"""
-        
-        _, _, qhead  = airsim.to_eularian_angles(self.client.simGetVehiclePose().orientation)
-        
-        # Each action relative to current heading 
-        d = self.client.getMultirotorState().kinematics_estimated.position.x_val
-        e = self.client.getMultirotorState().kinematics_estimated.position.y_val
-        delta = -1*qhead - math.atan2(0.08*e, self.drone_velocity)
-        alpha = math.exp(-abs(0*e/10))
-        k2 = np.exp(-(action-1)**2)
-        ux = -max(min(d-500,1),-1)
-        uy = -max(min(e-0, 1),-1)
-        heading = alpha*self.kp*(action-1)*np.pi/2 + (1-alpha)*0.05*delta
-        qhead = heading*self.delta_t + qhead
-        # print("-----Heading:", qhead)
-        quad_offset = (self.drone_velocity*math.cos(qhead), self.drone_velocity*math.sin(qhead), 0)
+
+        _, _, qhead = airsim.to_eularian_angles(self.client.simGetVehiclePose().orientation)
+        if directions == '4':
+            # Each action relative to current heading
+            if int(action) == 0:
+                offset = (-1.0, 0)
+            elif int(action) == 1:
+                offset = (1.0, 0)
+            elif int(action) == 2:
+                offset = (0, -1.0)
+            elif int(action) == 3:
+                offset = (0, 1.0)
+            else:
+                offset = (1.0, 0)
+            quad_offset = (self.drone_velocity * offset[0], self.drone_velocity * offset[1], 0)
+
+        elif directions == '3_customized':
+            # Each action relative to current heading
+            if int(action) == 0:
+                offset = (1.0, 0)
+            elif int(action) == 1:
+                offset = (0, -1.0)
+            elif int(action) == 2:
+                offset = (0, 1.0)
+            else:
+                offset = (1.0, 0)
+            quad_offset = (self.drone_velocity * offset[0], self.drone_velocity * offset[1], 0)
+
+        elif directions == '3_minus_y':
+            # Each action relative to current heading
+            d = self.client.getMultirotorState().kinematics_estimated.position.x_val
+            e = self.client.getMultirotorState().kinematics_estimated.position.y_val
+            delta = -1 * qhead - math.atan2(0.08 * e, self.drone_velocity)
+            alpha = math.exp(-abs(0 * e / 10))
+            k2 = np.exp(-(action - 1) ** 2)
+            ux = -max(min(d - 500, 1), -1)
+            uy = -max(min(e - 0, 1), -1)
+            heading = alpha * self.kp * (action - 1) * np.pi / 2 + (1 - alpha) * 0.05 * delta
+            qhead = heading * self.delta_t + qhead
+            # print("-----Heading:", qhead)
+            # y: sin -> cos
+            quad_offset = (self.drone_velocity * math.cos(qhead), self.drone_velocity*(math.sin(qhead) - 0.015), 0)
+        else:
+            # Each action relative to current heading
+            d = self.client.getMultirotorState().kinematics_estimated.position.x_val
+            e = self.client.getMultirotorState().kinematics_estimated.position.y_val
+            delta = -1*qhead - math.atan2(0.08*e, self.drone_velocity)
+            alpha = math.exp(-abs(0*e/10))
+            k2 = np.exp(-(action-1)**2)
+            ux = -max(min(d-500,1),-1)
+            uy = -max(min(e-0, 1),-1)
+            heading = alpha*self.kp*(action-1)*np.pi/2 + (1-alpha)*0.05*delta
+            qhead = heading*self.delta_t + qhead
+            # print("-----Heading:", qhead)
+            quad_offset = (self.drone_velocity*math.cos(qhead), self.drone_velocity*math.sin(qhead), 0)
+
         return quad_offset, qhead
 
     def RGBimage(self):
@@ -392,3 +477,30 @@ class DroneEnv(object):
 
         self.mindist = min(distL)
         return float(reward)
+
+    def compute_reward_dist(self, image, quad_state, quad_vel):
+        # current 0
+        # initial 100
+        # 1 - (0 / 100) = 1.0
+        #
+        # current 50
+        # initial 100
+        # 1 - (50 / 100) = 0.5
+        #
+        # current 100
+        # initial 100
+        # 1 - (100 / 100) = 0.0
+        #
+        # current 150
+        # initial 100
+        # 1- (150 / 100) = -0.5
+        #
+        # current 200
+        # initial 100
+        # 1- (200 / 100) = -1.0
+        current_dist = float(np.linalg.norm(np.array([quad_state.x_val, quad_state.y_val, quad_state.z_val,]) - np.array([self.destination.x_val, self.destination.y_val, self.destination.z_val,])))
+        reward = 1.0 - float(current_dist / self.initial_dist)
+        return float(reward)
+
+
+

@@ -32,14 +32,17 @@ PROJECT_ABSOLUTE_PATH = os.path.dirname(os.path.abspath(__file__))
 parser = argparse.ArgumentParser(description='Some input flags for testing PERD3QN')
 parser.add_argument('--dueling', default=False, action='store_true', help='Load if required Dueling')
 parser.add_argument('--load_model', default=True, action='store_true', help='Load model')
-parser.add_argument('--model_path', default='PRDDQN.pth', help='Model Path')
+parser.add_argument('--model_path', default='reward_dist_savefunc_best_distance_directions_3_customized\\PRDDQN_currentdist_154_model.pth', help='Model Path')
 parser.add_argument('--test_episode', default=50, help='Testing episodes')
 parser.add_argument('--log_path', default='log\\test\\', help='Log Path')
+parser.add_argument('--directions', default='3_customized', help='the directions that drone can move towards')
+
 
 
 args = parser.parse_args()
 
-file_path = PROJECT_ABSOLUTE_PATH + '\\'+ args.log_path + '\\{}.log'.format(datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S"))
+file_name = args.model_path.replace('\\', '_')[:-4]
+file_path = PROJECT_ABSOLUTE_PATH + '\\' + args.log_path + '{}_{}.log'.format(file_name, datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S"))
 directory_path = os.path.dirname(file_path)
 if not os.path.exists(directory_path):
     os.makedirs(directory_path)
@@ -63,13 +66,14 @@ epsilon_decay = 10000
 epsilon_by_frame = lambda frame_idx: epsilon_final + (epsilon_start - epsilon_final) * math.exp(-1. * frame_idx / epsilon_decay)
 
 # Initialize Environment
-env = DroneEnv()
+env = DroneEnv(logging=logging)
 
 # Initialize NN
+direction_num = int(args.directions.split('_')[0])
 if args.dueling:
-    target_model = DuelingCnnDQN([1,32,32], 3)
+    target_model = DuelingCnnDQN([1,32,32], direction_num)
 else:
-    target_model  = CnnDQN([1,32,32], 3)
+    target_model  = CnnDQN([1,32,32], direction_num)
 
 # USE CUDA if available
 USE_CUDA = torch.cuda.is_available()
@@ -79,10 +83,11 @@ if USE_CUDA:
 
 # Load model if continuing training
 if args.load_model:
-    path_ = PROJECT_ABSOLUTE_PATH + '\\{}'.format(args.model_path)
+    path_ = PROJECT_ABSOLUTE_PATH + '\\log\\model\\{}'.format(args.model_path)
     target_model.load_state_dict(torch.load(path_))
 
 time_list = []
+min_distances = []
 
 for e_ in range(int(args.test_episode)):
     # print("--------------Episode {}--------------:".format(e_))
@@ -97,6 +102,7 @@ for e_ in range(int(args.test_episode)):
     state = env.reset()
     env.setObsRandom()
     frame_idx = 1
+    min_distance = 100000
     while True:
         framerate = (1 - math.exp(-(frame_idx - 1) / 1000)) * framerate + math.exp(-(frame_idx - 1) / 1000) / (
                     current_time - prev_time)
@@ -108,8 +114,10 @@ for e_ in range(int(args.test_episode)):
         # print("-------Action {}-------:".format(frame_idx), action)
         env.setObsDynamic()
 
-        next_state, reward, done = env.step(action)
-        logging.info("Distance to destination is {}".format(str(env.distance_to_destination())))
+        next_state, reward, done = env.step(action, args.directions)
+        distance_ = env.distance_to_destination()
+        logging.info("Distance to destination is {}".format(str(distance_)))
+        min_distance = distance_ if distance_ < min_distance else min_distance
         # print("Distance to destination is {}".format(env.distance_to_destination()))
         frame_idx += 1
 
@@ -128,6 +136,7 @@ for e_ in range(int(args.test_episode)):
             logging.info('Unfortunately!\nYou have taken too may steps!')
             time_list.append(-2.0)
             break
+    min_distances.append(min_distance)
 
 positive_time_list= [x for x in time_list if x > 0.0]
 logging.info('Finish rate is {}'.format(str(float(len(positive_time_list)/len(time_list)))))
@@ -135,3 +144,6 @@ logging.info('Collision rate is {}'.format(str(float(time_list.count(-10.0)/len(
 logging.info('Over step limit rate is {}'.format(str(float(time_list.count(-2.0)/len(time_list)))))
 average_time = -1 if len(positive_time_list) == 0 else float(sum(positive_time_list)) / len(positive_time_list)
 logging.info('Average finish time is {} seconds'.format(str(average_time)))
+logging.info('Finish distance is {} meters'.format(min_distances))
+average_distance = -1 if len(min_distances) == 0 else float(sum(min_distances)) / len(min_distances)
+logging.info('Average finish distance is {} meters'.format(str(average_distance)))
